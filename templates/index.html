@@ -1,0 +1,377 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<title>JARVIS</title>
+
+<style>
+body {
+    background: #10141f;
+    color: white;
+    font-family: Arial;
+    text-align: center;
+    padding: 30px;
+}
+
+h1 {
+    color: #00e5ff;
+}
+
+#chat {
+    max-width: 600px;
+    margin: 30px auto;
+}
+
+input {
+    width: 65%;
+    padding: 14px;
+    border-radius: 10px;
+}
+
+button {
+    padding: 14px;
+    background: #00e5ff;
+    border: 0;
+    border-radius: 10px;
+    cursor: pointer;
+    margin: 5px;
+}
+
+#reply {
+    margin: 20px;
+    white-space: pre-wrap;
+}
+</style>
+</head>
+
+<body>
+
+<h1>JARVIS</h1>
+<p>Your personal AI assistant</p>
+
+<div id="chat">
+
+<input id="msg" placeholder="Ask JARVIS..." />
+
+<button onclick="send(true)">Send</button>
+<button onclick="send(false)">Enter</button>
+
+<button id="voiceToggle" onclick="toggleVoice()">Voice: ON</button>
+<button onclick="listen()">Speak</button>
+<button onclick="stopSpeaking()">Stop Voice</button>
+<button id="wakeToggle" onclick="toggleWake()">Wake Word: OFF</button>
+
+<div id="reply"></div>
+
+</div>
+
+<script>
+
+let speechEnabled = true;
+let wakeEnabled = false;
+let wakeRecognition = null;
+let wakeStarting = false;
+let wakePaused = false;
+
+// VOICE ON/OFF
+
+function toggleVoice() {
+    speechEnabled = !speechEnabled;
+
+    document.getElementById('voiceToggle').textContent =
+        speechEnabled ? "Voice: ON" : "Voice: OFF";
+
+    if (!speechEnabled) {
+        stopSpeaking();
+    }
+}
+
+// SEND MESSAGE
+
+async function send(shouldSpeak = true) {
+
+    const input = document.getElementById('msg');
+    const reply = document.getElementById('reply');
+    const message = input.value.trim();
+
+    if (!message) return;
+
+    reply.textContent = "JARVIS is thinking...";
+    input.value = "";
+
+    try {
+        const response = await fetch('/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message})
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.reply || "Request failed.");
+        }
+
+        const answer = data.reply || "No reply received.";
+        reply.textContent = answer;
+
+        if (shouldSpeak && speechEnabled) {
+            speak(answer);
+        } else {
+            resumeWake();
+        }
+
+    } catch (error) {
+        reply.textContent = "Connection error: " + error.message;
+        resumeWake();
+    }
+}
+
+// SPEAK RESPONSE
+
+function speak(text) {
+
+    if (!('speechSynthesis' in window)) {
+        resumeWake();
+        return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    const speech = new SpeechSynthesisUtterance(text);
+
+    speech.lang = 'en-IN';
+    speech.rate = 1;
+    speech.pitch = 1;
+    speech.volume = 1;
+
+    speech.onend = function() {
+        resumeWake();
+    };
+
+    speech.onerror = function() {
+        resumeWake();
+    };
+
+    window.speechSynthesis.speak(speech);
+}
+
+// STOP VOICE
+
+function stopSpeaking() {
+    window.speechSynthesis.cancel();
+    resumeWake();
+}
+
+// MANUAL VOICE INPUT
+
+function listen() {
+
+    const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    const reply = document.getElementById('reply');
+
+    if (!SpeechRecognition) {
+        reply.textContent = "Speech recognition is unsupported.";
+        return;
+    }
+
+    stopSpeaking();
+
+    // Pause wake recognition before manual listening
+    wakePaused = true;
+
+    if (wakeRecognition) {
+        wakeRecognition.onend = null;
+        wakeRecognition.stop();
+        wakeRecognition = null;
+    }
+
+    const recognition = new SpeechRecognition();
+
+    recognition.lang = 'en-IN';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onstart = function() {
+        reply.textContent = "Listening...";
+    };
+
+    recognition.onresult = function(event) {
+        document.getElementById('msg').value =
+            event.results[0][0].transcript;
+
+        send(true);
+    };
+
+    recognition.onerror = function(event) {
+        reply.textContent = "Speech error: " + event.error;
+        resumeWake();
+    };
+
+    recognition.onend = function() {
+        if (!document.getElementById('msg').value.trim()) {
+            resumeWake();
+        }
+    };
+
+    try {
+        recognition.start();
+    } catch (error) {
+        reply.textContent = "Could not start microphone.";
+        resumeWake();
+    }
+}
+
+// WAKE WORD SYSTEM
+
+function toggleWake() {
+
+    wakeEnabled = !wakeEnabled;
+
+    document.getElementById('wakeToggle').textContent =
+        wakeEnabled ? "Wake Word: ON" : "Wake Word: OFF";
+
+    if (wakeEnabled) {
+        wakePaused = false;
+        startWakeRecognition();
+    } else {
+        wakePaused = true;
+
+        if (wakeRecognition) {
+            wakeRecognition.onend = null;
+            wakeRecognition.stop();
+            wakeRecognition = null;
+        }
+
+        wakeStarting = false;
+
+        document.getElementById('reply').textContent =
+            "Wake word disabled.";
+    }
+}
+
+// START WAKE LISTENING
+
+function startWakeRecognition() {
+
+    const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition || !wakeEnabled ||
+        wakePaused || wakeStarting || wakeRecognition) {
+        return;
+    }
+
+    wakeStarting = true;
+
+    const recognition = new SpeechRecognition();
+    wakeRecognition = recognition;
+
+    recognition.lang = 'en-IN';
+    recognition.continuous = true;
+    recognition.interimResults = false;
+
+    recognition.onstart = function() {
+        wakeStarting = false;
+
+        document.getElementById('reply').textContent =
+            'Listening for "Hey JARVIS"...';
+    };
+
+    recognition.onresult = function(event) {
+
+        for (let i = event.resultIndex;
+             i < event.results.length; i++) {
+
+            if (!event.results[i].isFinal) continue;
+
+            const transcript =
+                event.results[i][0].transcript.trim();
+
+            const match = transcript.match(
+                /(?:hey|hi|hello)\s+jarvis[\s,.:;-]*(.*)/i
+            );
+
+            if (!match) continue;
+
+            const command = match[1].trim();
+
+            wakePaused = true;
+
+            recognition.onend = null;
+            recognition.stop();
+            wakeRecognition = null;
+
+            if (command) {
+                document.getElementById('msg').value = command;
+                send(true);
+            } else {
+                speak("Yes? I'm listening.");
+            }
+
+            return;
+        }
+    };
+
+    recognition.onerror = function(event) {
+
+        wakeStarting = false;
+
+        if (event.error !== 'no-speech' &&
+            event.error !== 'aborted') {
+
+            document.getElementById('reply').textContent =
+                "Wake word error: " + event.error;
+        }
+    };
+
+    recognition.onend = function() {
+
+        wakeRecognition = null;
+        wakeStarting = false;
+
+        if (wakeEnabled && !wakePaused) {
+            setTimeout(startWakeRecognition, 1000);
+        }
+    };
+
+    try {
+        recognition.start();
+    } catch (error) {
+        wakeRecognition = null;
+        wakeStarting = false;
+    }
+}
+
+// RESUME WAKE LISTENING
+
+function resumeWake() {
+
+    if (!wakeEnabled) return;
+
+    wakePaused = false;
+
+    if (!wakeRecognition && !wakeStarting) {
+        setTimeout(startWakeRecognition, 1000);
+    }
+}
+
+// ENTER KEY = TEXT ONLY
+
+document.getElementById('msg').addEventListener(
+    'keydown',
+    function(event) {
+
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            send(false);
+        }
+    }
+);
+
+</script>
+
+</body>
+</html>
