@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import webbrowser
+from ddgs import DDGS
 
 app = Flask(__name__)
 
@@ -27,6 +28,9 @@ Rules:
 - Never claim you performed an action unless you did.
 - Ask permission before suggesting risky computer actions.
 - Use saved memories and past conversations when relevant.
+- When web search results are provided, use them to answer.
+- Do not invent information or sources.
+- Mention when search results do not provide enough information.
 """
 
 
@@ -118,7 +122,6 @@ WEBSITES = {
 def control_computer(message):
     command = message.lower().strip()
 
-    # Open approved applications
     for name, executable in APP_COMMANDS.items():
         if command in (
             f"open {name}",
@@ -128,7 +131,6 @@ def control_computer(message):
             subprocess.Popen(executable)
             return f"Opening {name}."
 
-    # Open approved folders
     for name, path in FOLDER_COMMANDS.items():
         if command in (
             f"open {name}",
@@ -137,9 +139,9 @@ def control_computer(message):
             if os.path.isdir(path):
                 os.startfile(path)
                 return f"Opening {name}."
+
             return f"{name} folder was not found."
 
-    # Open approved websites
     for name, url in WEBSITES.items():
         if command in (
             f"open {name}",
@@ -152,6 +154,44 @@ def control_computer(message):
     return None
 
 
+# INTERNET SEARCH
+
+def extract_search_query(message):
+    patterns = [
+        r"^search (?:the web )?for (.+)$",
+        r"^search (.+)$",
+        r"^look up (.+)$",
+        r"^find online (.+)$",
+    ]
+
+    for pattern in patterns:
+        match = re.match(pattern, message.strip(), re.IGNORECASE)
+
+        if match:
+            return match.group(1).strip()
+
+    return None
+
+
+def search_web(query):
+    results = []
+
+    with DDGS() as ddgs:
+        search_results = ddgs.text(
+            query,
+            max_results=5
+        )
+
+        for result in search_results:
+            results.append({
+                "title": result.get("title", ""),
+                "url": result.get("href", ""),
+                "description": result.get("body", "")
+            })
+
+    return results
+
+
 initialise_database()
 
 
@@ -162,39 +202,79 @@ def home():
 
 @app.route("/chat", methods=["POST"])
 def chat():
+
     message = (request.json or {}).get("message", "").strip()
 
     if not message:
         return jsonify({"reply": "Please enter a message."}), 400
 
     try:
-        # Computer control
+
+        # COMPUTER CONTROL
+
         computer_reply = control_computer(message)
 
         if computer_reply:
             save_message("user", message)
             save_message("assistant", computer_reply)
+
             return jsonify({"reply": computer_reply})
 
-        # Manual memory command
+        # MANUAL MEMORY
+
         if message.lower().startswith("remember that "):
+
             fact = message[len("remember that "):].strip()
 
             if fact:
                 save_memory(fact)
 
             reply = "I have saved that in my memory."
+
             save_message("user", message)
             save_message("assistant", reply)
 
             return jsonify({"reply": reply})
 
-        # Automatic memory detection
+        # AUTOMATIC MEMORY
+
         for fact in detect_memories(message):
             save_memory(fact)
 
-        # Load memories and conversation history
+        # INTERNET SEARCH
+
+        search_query = extract_search_query(message)
+        search_context = ""
+
+        if search_query:
+
+            try:
+                results = search_web(search_query)
+
+                if results:
+                    search_context = "\n\nWEB SEARCH RESULTS:\n"
+
+                    for i, result in enumerate(results, 1):
+                        search_context += (
+                            f"\n{i}. {result['title']}\n"
+                            f"URL: {result['url']}\n"
+                            f"Information: {result['description']}\n"
+                        )
+                else:
+                    search_context = (
+                        "\n\nNo web search results were found."
+                    )
+
+            except Exception as search_error:
+                search_context = (
+                    "\n\nWeb search failed: "
+                    + str(search_error)
+                )
+
+        # LOAD MEMORY AND HISTORY
+
         with get_db() as db:
+
             memories = db.execute(
                 "SELECT fact FROM memories ORDER BY id"
             ).fetchall()
@@ -211,7 +291,11 @@ def chat():
             "role": "system",
             "content": SYSTEM_PROMPT
             + "\n\nSaved memories:\n"
-            + (memory_text if memory_text else "No saved memories yet.")
+            + (
+                memory_text
+                if memory_text
+                else "No saved memories yet."
+            )
         }]
 
         messages.extend([
@@ -219,10 +303,17 @@ def chat():
             for role, content in history
         ])
 
+        current_message = message
+
+        if search_context:
+            current_message += search_context
+
         messages.append({
             "role": "user",
-            "content": message
+            "content": current_message
         })
+
+        # SEND TO OMNIROUTE
 
         response = requests.post(
             OMNIROUTE_URL,
@@ -244,18 +335,21 @@ def chat():
         return jsonify({"reply": reply})
 
     except requests.exceptions.RequestException as e:
+
         return jsonify({
             "reply": f"OmniRoute connection error: {e}"
         }), 500
 
     except (KeyError, IndexError, TypeError):
+
         return jsonify({
             "reply": "JARVIS received an unexpected response."
         }), 500
 
     except Exception as e:
+
         return jsonify({
-            "reply": f"Computer control error: {e}"
+            "reply": f"Error: {e}"
         }), 500
 
 
